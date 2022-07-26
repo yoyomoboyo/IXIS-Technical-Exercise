@@ -1,0 +1,297 @@
+setwd("~/IXIS Technical Exercise")
+
+#load packages
+library(pacman)
+pacman::p_load(tidyverse, openxlsx, corrplot, lubridate, Rcpp, purrr, ggthemes) 
+
+#load spreadsheets
+addsToCart<- read.csv("DataAnalyst_Ecom_data_addsToCart.csv")
+sessionCounts<- read.csv("DataAnalyst_Ecom_data_sessionCounts.csv")
+
+#format dim_date to date type
+sessionCounts$date<- as.Date(sessionCounts$dim_date, "%m/%d/%y")
+
+#checking for instances with zero transactions but QTY over 1
+sessionCounts%>%
+  filter(transactions==0 & QTY>0)
+
+#checking for instances with more transactions than QTY
+sessionCounts%>%
+  filter(transactions>QTY)
+
+#checking for instances with more transactions than sessions
+sessionCounts%>%
+  filter(transactions>sessions)
+
+#checking for instances with zero sessions but transactions over 1
+sessionCounts%>%
+  filter(sessions==0 & QTY>0)
+
+#creating column error to track distribution
+sessionError<- sessionCounts%>%
+  mutate(error=if_else((transactions==0 & QTY>0)|
+                         (transactions>QTY)|
+                         (transactions>sessions)|
+                         (sessions==0 & QTY>0),
+                         1, 0))
+
+#plot of error rate by browser
+sessionError%>%
+  group_by(dim_browser)%>%
+  summarise(errorRate=mean(error))%>%
+  arrange(desc(errorRate))%>%
+  #removing all browsers with zero errors, to many with
+  filter(errorRate>0)%>%
+  ggplot(aes(x=dim_browser, y=errorRate, fill=dim_browser))+
+  geom_bar(stat = 'identity')+coord_flip()
+  
+#plot of error rate by device type
+sessionError%>%
+  group_by(dim_deviceCategory)%>%
+  summarise(errorRate=mean(error))%>%
+  ggplot(aes(x=dim_deviceCategory, y=errorRate, fill=dim_deviceCategory))+
+  geom_bar(stat = 'identity')+coord_flip()
+
+#plot of error rate over time
+sessionError%>%
+  #create YearMonth so error rate can be grouped by month
+  mutate(YearMonth=floor_date(date,'month'))%>%
+  group_by(YearMonth)%>%
+  summarise(errorRate=mean(error))%>%
+  ggplot(aes(x=YearMonth, y=errorRate))+
+    geom_line()+
+    coord_cartesian(ylim = c(0,.2))
+  
+
+#create Month * Device data
+groupedCounts<- sessionError%>%
+  rename(DeviceType = dim_deviceCategory)%>%
+  #filter out errors
+  filter(error==0)%>%
+  #create column YearMonth that rounds each date down to the first of that month
+  mutate(YearMonth=floor_date(date,'month'))%>%
+  #group by device type and YearMonth
+  group_by(DeviceType, YearMonth)%>%
+  #remove unwanted columns
+  select(-dim_browser, -dim_date, -date, -error)%>%
+  #summarize all remaining columns that are not being grouped
+  summarise(across(everything(), sum))%>%
+  #create ECR column
+  mutate(ECR=transactions/sessions,
+  #create Average Quantity (AQ) 
+  AQ=QTY/transactions
+         )
+
+#summary statistics
+summary(groupedCounts)
+
+#summary statistics for each device
+groupedCounts %>%
+  select(-YearMonth)%>%
+  split(.$DeviceType) %>%
+  map(summary)
+#ECR is different for each device, desktop highest
+
+##barplot of ECR by device type
+ggplot(data=groupedCounts, aes(x=DeviceType, y= ECR, fill=DeviceType))+
+  geom_bar(stat = "summary")+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  coord_cartesian(ylim = c(0,.05))+
+  theme_hc()+
+  labs(title = "ECR by Device Type", x="Device Type", y="Ecommerce Conversion Rate (ECR)")+
+  theme(legend.position="none")
+
+##plot of Devices ECR by Month
+ggplot(data = groupedCounts, aes(x=YearMonth, y=ECR))+
+  geom_line(aes(group=DeviceType, color= DeviceType))+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  coord_cartesian(ylim = c(0,.05))+
+  theme_hc()+
+  labs(title = "ECR by Device Type", x="Month", y="Ecommerce Conversion Rate (ECR)", color= "Device Type")
+
+#Plot of AQ for Each Device by Month
+ggplot(data = groupedCounts, aes(x=YearMonth, y=AQ))+
+  geom_line(aes(group=DeviceType, color= DeviceType))+
+  coord_cartesian(ylim = c(1.5,2.5))+
+  theme_hc()+
+  labs(title = "AQ by Device Type", x="Month", y="Average Quantity (AQ)", color= "Device Type")
+ 
+#Manipulating data to see percent of sessions, transactions, and QTY each 
+##device responsible for
+groupedPerc<-groupedCounts%>%
+  group_by(DeviceType)%>%
+  select(-YearMonth, -ECR, -AQ)%>%
+  summarise(across(everything(), sum))%>%
+  mutate(PercTransaction=transactions/sum(transactions),
+         PercSession=sessions/sum(sessions),
+         PercQTY=QTY/sum(QTY))%>%
+  select(-sessions, -transactions, -QTY)
+
+#collumn plot of Transaction percent by Device
+ggplot(data= groupedPerc, aes(x = "", y = PercTransaction, fill = DeviceType)) +
+  geom_col(color = "black")+
+  ##making scale percent
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  theme_gdocs()+
+  labs(title = "% Transaction by Device Type", x="", y="Transaction %", color= "Device Type")
+
+#collumn plot of Session percent by Device
+ggplot(data= groupedPerc, aes(x = "", y = PercSession, fill = DeviceType)) +
+  geom_col(color = "black")+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  theme_gdocs()+
+  theme(legend.position="none")+
+  labs(title = "% Sessions by Device Type", x="", y="Session %", color= "Device Type")
+
+#collumn plot of QTY percent by Device
+ggplot(data= groupedPerc, aes(x = "", y = PercQTY, fill = DeviceType, label=PercQTY)) +
+  geom_col(color = "black")+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  theme_gdocs()+
+  labs(title = "% QTY by Device Type", x="", y="QTY %", color= "Device Type")
+
+
+
+
+#format date using year and month for addsToCart
+addsToCart$YearMonth<-as.Date(with(addsToCart,paste(dim_year,dim_month,1,sep="-")),"%Y-%m-%d")
+
+MonthJoin<- sessionCounts%>%
+  #create column YearMonth that rounds each date down to the first of that month
+  mutate(YearMonth=floor_date(date,'month'))%>%
+  #group by device type and YearMonth
+  group_by(YearMonth)%>%
+  #remove unwanted columns
+  select(-dim_browser, -dim_date, -date, -dim_deviceCategory)%>%
+  #summarize all remaining columns that are not being grouped
+  summarise(across(everything(), sum))%>%
+  inner_join(addsToCart)%>%
+  select(-dim_year, -dim_month)%>%
+  arrange(YearMonth)%>%
+  mutate(ECR=transactions/sessions, TpA=transactions/addsToCart, ApS=addsToCart/sessions, QpT=QTY/transactions)
+
+#correlation plot
+corrplot(cor(MonthJoin%>% select(-YearMonth)), method='number')
+
+#scatterplot of ECR by month
+ggplot(data=MonthJoin, aes(x=YearMonth, y= ECR))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  #formating y axis limits
+  coord_cartesian(ylim = c(.01,.04))+
+  #making y axis pecent
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  theme_hc()+
+  labs(title = "Steady ECR Month to Month", x="Month", y="Ecommerce Conversion Rate (ECR)")
+  
+#scatterplot of Transactions/AddsToCart (TpA) by month
+ggplot(data=MonthJoin, aes(x=YearMonth, y= TpA))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  coord_cartesian(ylim = c(.05,.35))+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  theme_hc()+
+  labs(title = "Transactions per Add to Cart (TpA) trending Up", x="Month", y="Transactions per Adds to Cart (TpA)")
+
+#scatterplot of AddsToCart/Sessions by month
+ggplot(data=MonthJoin, aes(x=YearMonth, y= ApS))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  coord_cartesian(ylim = c(.05,.4))+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  theme_hc()+
+  labs(title = "Adds to Cart per Session trending Down", x="Month", y="Adds to Cart per Session (ApS)")
+
+#linear model of transactions by adds to cart
+model1=lm(transactions~addsToCart, data=MonthJoin)
+summary(model1)
+
+#linear model of transactions by sessions
+model2=lm(transactions~sessions, data=MonthJoin)
+summary(model2)
+
+#scatter chart of transactions by sessions
+ggplot(data=MonthJoin, aes(x=transactions, y=sessions))+
+  geom_point()+
+  theme_hc()+
+  geom_smooth(method="lm")+
+  labs(title = "Sessions strong linear relationship with Transactions", x="Monthly Transactions", y="Monthly Sessions")
+
+
+#function that takes the difference between the lag and 
+Adif<-function(x){
+  y=(x-lag(x))
+}
+
+Rdif<-function(x){
+  y=(x-lag(x))/lag(x)
+}
+
+MonthOver<- MonthJoin%>%
+  mutate(Rdif_sessions=Rdif(sessions), Adif_sessions=Adif(sessions),
+         Rdif_transactions=Rdif(transactions), Adif_transactions=Adif(transactions),
+         Rdif_QTY=Rdif(QTY), Adif_QTY=Adif(QTY),
+         Rdif_ECR=Rdif(ECR), Adif_ECR=Adif(ECR),
+         Rdif_addsToCart=Rdif(addsToCart), Adif_addsToCart=Adif(addsToCart)
+  )
+
+recMonth<-
+  MonthJoin%>%
+  filter(YearMonth>'2013-04-01')
+
+#creating workbook
+wb<- createWorkbook()
+
+#bold style to be applied to headers
+bold <- createStyle(textDecoration = "Bold", halign = "center", valign = "center", wrapText = TRUE)
+
+#adding month by device data
+addWorksheet(wb, "Month by Device")
+writeDataTable(wb, "Month by Device", groupedCounts, headerStyle = bold)
+
+#adding month over month data
+addWorksheet(wb, "Month Over Month")
+writeData(wb, "Month Over Month", recMonth, headerStyle = bold)
+
+#adding Absolute Difference and Relative Difference headers
+writeData(wb,"Month Over Month", x=c("Absolute Difference", "Relative Difference"), startCol = 1, startRow = 4)
+#adding bold style
+addStyle(wb,"Month Over Month", bold, col = 1, row = 4:5)
+
+#writing absolute and relative difference formulas for each row
+writeFormula(wb, "Month Over Month", x=c("B3-B2", "(B3-B2)/B2"),startCol = 2, startRow = 4)
+writeFormula(wb, "Month Over Month", x=c("C3-C2", "(C3-C2)/C2"),startCol = 3, startRow = 4)
+writeFormula(wb, "Month Over Month", x=c("D3-D2", "(D3-D2)/D2"),startCol = 4, startRow = 4)
+writeFormula(wb, "Month Over Month", x=c("E3-E2", "(E3-E2)/E2"),startCol = 5, startRow = 4)
+writeFormula(wb, "Month Over Month", x=c("F3-F2", "(F3-F2)/F2"),startCol = 6, startRow = 4)
+writeFormula(wb, "Month Over Month", x=c("G3-G2", "(G3-G2)/G2"),startCol = 7, startRow = 4)
+writeFormula(wb, "Month Over Month", x=c("H3-H2", "(H3-H2)/H2"),startCol = 8, startRow = 4)
+writeFormula(wb, "Month Over Month", x=c("I3-I2", "(I3-I2)/I2"),startCol = 9, startRow = 4)
+
+#creating style to format numbers as percentages
+pct <- createStyle(numFmt="0%")
+
+#adding style to relative differences
+addStyle(wb, "Month Over Month",pct,col= 2:9, row = 5)
+
+#creating a positive style (green) and negative style (red)
+negStyle <- createStyle(fontColour = "#9C0006", bgFill = "#FFC7CE")
+posStyle <- createStyle(fontColour = "#006100", bgFill = "#C6EFCE")
+
+#conditionally formatting positive difference to be green and negative to be red
+conditionalFormatting(wb, "Month Over Month",
+                      cols = 2:9,
+                      rows = 4:5, rule = "<0", style = negStyle
+)
+conditionalFormatting(wb, "Month Over Month",
+                      cols = 2:9,
+                      rows = 4:5, rule = ">0", style = posStyle
+)
+
+#adding device percentages sheet to workbook
+addWorksheet(wb, "Device Percentages")
+writeData(wb, "Device Percentages", groupedPerc, headerStyle = bold)
+
+#saving workbook
+saveWorkbook(wb, file="IXIS.xlsx", overwrite=TRUE)
+
